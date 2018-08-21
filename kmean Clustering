@@ -1,0 +1,78 @@
+import datetime
+from dateutil import parser
+import elasticsearch
+import re
+from elasticsearch_dsl import Search
+from elasticsearch.helpers import scan
+from neo4jrestclient.client import GraphDatabase
+
+import collections
+from nltk import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from sklearn.cluster import KMeans
+from sklearn.feature_extraction.text import TfidfVectorizer
+from pprint import pprint
+
+
+
+print ("Starting now.." + str(datetime.datetime.now()))
+def word_tokenizer(text):
+        #tokenizes and stems the text
+        tokens = word_tokenize(text)
+        stemmer = PorterStemmer()
+        tokens = [stemmer.stem(t) for t in tokens if t not in stopwords.words('english')]
+        return tokens
+
+
+def cluster_sentences(sentences, nb_of_clusters=5):
+        tfidf_vectorizer = TfidfVectorizer(tokenizer=word_tokenizer,
+                                        stop_words=stopwords.words('english'))
+        #builds a tf-idf matrix for the sentences
+        tfidf_matrix = tfidf_vectorizer.fit_transform(sentences)
+        kmeans = KMeans(n_clusters=nb_of_clusters)
+        kmeans.fit(tfidf_matrix)
+        clusters = collections.defaultdict(list)
+        #print(kmeans.labels_)
+        for i,label in enumerate(kmeans.labels_):
+                clusters[label].append(i)
+        return dict(clusters)
+
+
+
+if __name__ == "__main__":
+        document =[]
+        date2 = "05/01/2017 23.59.59"
+        date1 = "07/01/2018 00.00.00"
+        
+        db = GraphDatabase("localhost:7474", username="neo4j", password="admin")
+        incident_cluster = db.labels.create("incident_cluster")
+        incident_key = db.labels.create("incident_key")
+        incident_details = db.labels.create("incident_details")
+        
+        mi_es =elasticsearch.Elasticsearch("http://elastic:changeme@localhost:9200",timeout=1800)
+        for doc in scan(mi_es,query={"query":{"bool":{"must":[{"match_phrase":{"u_business_service":"abc"}},{"range": {"opened_at":{"gt":date2, "lt": date1}}}]}}},index="incidents", doc_type="incidents",scroll = '20m'):
+                   doc_sentence = doc["_id"] +"$"+ doc["_source"]["priority"] +"$"+ doc["_source"]["opened_at"] +"$"+ doc["_source"]["short_description"] +"$"+ doc["_source"]["description"]
+                   document.append(doc_sentence)
+                #print(doc["_id"])
+        sentences = document
+        nclusters= 2328
+        clusters = cluster_sentences(sentences, nclusters)
+        for cluster in range(nclusters):
+                #print ("cluster ",cluster,":")
+                cluster_name = "abc"+"cluster "+str(cluster)
+                c1 = db.nodes.create(name=cluster_name)
+                incident_cluster.add(c1)
+                for i,sentence in enumerate(clusters[cluster]):
+                        #print ("\tsentence ",i,": ",sentences[sentence])
+                        inc_detail = sentences[sentence].split('$')
+                        #print(inc_detail[0])
+                        inc = db.nodes.create(name=inc_detail[0])
+                        incident_key.add(inc)
+                        incident_detail = db.nodes.create(name=sentences[sentence])
+                        incident_details.add(incident_detail)
+                        inc.relationships.create("is_part_of", c1)
+                        inc.relationships.create("having_details", incident_detail)
+                        
+print ("Ending now.." + str(datetime.datetime.now()))
+
